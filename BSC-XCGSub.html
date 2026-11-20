@@ -159,6 +159,14 @@ body:not(.overview-view) .project-image-card{display:none!important}
 @media (max-width:900px){
  body.history-panel-docked .main,body.chat-panel-docked .main,body.history-panel-docked.chat-panel-docked .main{padding-right:15px!important}
 }
+
+/* Deterministic drawer positioning: existing overlay positioning no longer stacks panels. */
+@media(min-width:901px){
+  body.bayshore-side-dock .main{padding-right:calc(clamp(16px,3vw,44px) + var(--bayshore-drawers-width,0px) + 14px)!important}
+  #historyPanel.bayshore-docked,#chatPanel.bayshore-docked{position:fixed!important;top:0!important;bottom:0!important;transform:translateX(0)!important;visibility:visible!important;z-index:105!important;max-width:none!important}
+  #historyPanel.bayshore-docked{z-index:105!important}
+  #chatPanel.bayshore-docked{z-index:106!important}
+}
 </style><script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
@@ -240,11 +248,8 @@ function initHistoryPanel(){
  const panes=[document.getElementById('historySessionEntries'),document.getElementById('historyChangeEntries')];
  function selectTab(i){tabs.forEach((tab,j)=>{tab.classList.toggle('active',i===j);tab.setAttribute('aria-selected',String(i===j));tab.tabIndex=i===j?0:-1;panes[j].hidden=i!==j;});}
  function toggle(open){panel.classList.toggle('open',open);panel.setAttribute('aria-hidden',String(!open));panel.inert=!open;backdrop.hidden=!open;openBtn.setAttribute('aria-expanded',String(open));if(open){selectTab(0);closeBtn.focus();}else{openBtn.focus();}}
- openBtn.addEventListener('click',()=>toggle(true));
- closeBtn.addEventListener('click',()=>toggle(false));
- backdrop.addEventListener('click',()=>toggle(false));
+ window.__bayshoreHistoryToggle=toggle;
  tabs.forEach((tab,i)=>tab.addEventListener('click',()=>selectTab(i)));
- document.addEventListener('keydown',e=>{if(e.key==='Escape'&&panel.classList.contains('open'))toggle(false)});
 }
 function showPresence(records){
  const now=Date.now();const active=records.filter(x=>x.lastSeen&&x.lastSeen.toMillis&&now-x.lastSeen.toMillis()<ONLINE_WINDOW_MS).sort((a,b)=>(a.username||'').localeCompare(b.username||''));
@@ -639,9 +644,7 @@ $('csvBtn').onclick=()=>{const rows=[['Agency','Headline / Submission Group','Re
    if(open){pendingCount=0;updateBadge();connect();closeBtn.focus()}
    else{if(unlistenChat){unlistenChat();unlistenChat=null}lastSnapshot=null;openBtn.focus()}
  }
- openBtn.addEventListener('click',()=>toggle(true));mobileOpen.addEventListener('click',()=>toggle(true));
- closeBtn.addEventListener('click',()=>toggle(false));backdrop.addEventListener('click',()=>toggle(false));
- document.addEventListener('keydown',e=>{if(e.key==='Escape'&&panel.classList.contains('open'))toggle(false)});
+ window.__bayshoreChatToggle=toggle;
  form.addEventListener('submit',async e=>{
    e.preventDefault();if(!canChat()){refreshAccess();state.textContent='Enter a username and log in first';return;}
    const text=input.value.trim();if(!text||text.length>1200)return;
@@ -669,48 +672,92 @@ $('csvBtn').onclick=()=>{const rows=[['Agency','Headline / Submission Group','Re
 </script><script>initHistoryPanel();</script>
 <script>
 (function(){
-  const history=document.getElementById('historyPanel'),chat=document.getElementById('chatPanel');
-  if(!history||!chat)return;
-  const config={
-    history:{panel:history,pin:document.getElementById('historyPanelPin'),trigger:document.getElementById('historyPanelOpen'),close:document.getElementById('historyPanelClose'),backdrop:document.getElementById('historyPanelBackdrop'),key:'bayshore-history-pinned'},
-    chat:{panel:chat,pin:document.getElementById('chatPanelPin'),trigger:document.getElementById('chatPanelOpen'),close:document.getElementById('chatPanelClose'),backdrop:document.getElementById('chatPanelBackdrop'),key:'bayshore-chat-pinned'}
-  };
-  if(!config.history.pin||!config.chat.pin)return;
-  const desktop=window.matchMedia('(min-width:901px)');
-  function sync(){
-    const h=desktop.matches&&history.classList.contains('pinned');
-    const c=desktop.matches&&chat.classList.contains('pinned');
-    document.body.classList.toggle('history-panel-docked',h);
-    document.body.classList.toggle('chat-panel-docked',c);
-    for(const [name,on] of [['history',h],['chat',c]]){
-      const p=config[name];
-      p.pin.setAttribute('aria-pressed',String(on));p.pin.textContent=on?'📌 Pinned':'📌 Pin';
-      if(on){p.panel.classList.add('open');p.panel.inert=false;p.panel.setAttribute('aria-hidden','false');p.trigger.setAttribute('aria-expanded','true');p.backdrop.hidden=true;}
-    }
+ const data={
+  history:{panel:document.getElementById('historyPanel'),trigger:document.getElementById('historyPanelOpen'),pin:document.getElementById('historyPanelPin'),close:document.getElementById('historyPanelClose'),backdrop:document.getElementById('historyPanelBackdrop'),key:'bayshore-history-pinned',toggle:()=>window.__bayshoreHistoryToggle},
+  chat:{panel:document.getElementById('chatPanel'),trigger:document.getElementById('chatPanelOpen'),pin:document.getElementById('chatPanelPin'),close:document.getElementById('chatPanelClose'),backdrop:document.getElementById('chatPanelBackdrop'),key:'bayshore-chat-pinned',toggle:()=>window.__bayshoreChatToggle}
+ };
+ const mobileBtn=document.getElementById('chatMobileOpen');
+ if(Object.values(data).some(x=>!x.panel||!x.pin||!x.toggle()))return;
+ const wide=window.matchMedia('(min-width:901px)');
+ const state={history:{open:false,pinned:false},chat:{open:false,pinned:false}};
+ let pinSequence=[];
+ function safeStore(name,val){try{localStorage.setItem(data[name].key,String(val))}catch(e){}}
+ function openState(name,open){
+  const f=data[name].toggle();
+  if(state[name].open!==open){f(open);state[name].open=open}
+ }
+ function unpin(name){state[name].pinned=false;safeStore(name,false);pinSequence=pinSequence.filter(n=>n!==name)}
+ function setOpen(name,open){
+  const other=name==='history'?'chat':'history';
+  if(open){
+   // Only one transient (unpinned) drawer at a time; pinned drawer never auto-hides.
+   if(state[other].open&&!state[other].pinned)openState(other,false);
+   openState(name,true);
+  }else{
+   if(state[name].pinned)unpin(name);
+   openState(name,false);
   }
-  function pin(name,force){
-    const p=config[name],state=desktop.matches&&force;
-    p.panel.classList.toggle('pinned',state);
-    try{localStorage.setItem(p.key,String(state))}catch(e){}
-    sync();
+  render();
+ }
+ function setPin(name){
+  if(!wide.matches)return;
+  state[name].pinned=!state[name].pinned;
+  safeStore(name,state[name].pinned);
+  pinSequence=pinSequence.filter(n=>n!==name);
+  if(state[name].pinned){pinSequence.push(name);openState(name,true)}
+  render();
+ }
+ function render(){
+  // On phones, drawers remain overlays and never become fixed side-by-side columns.
+  const desktop=wide.matches;
+  const active=Object.keys(state).filter(n=>state[n].open);
+  const both=desktop&&active.length===2;
+  const firstPinned=pinSequence.find(n=>active.includes(n));
+  // The first pinned panel remains on the left, and the second panel opens to its right.
+  const left=both?(firstPinned || active[0]):null;
+  const right=both?(left==='history'?'chat':'history'):active[0]||null;
+  const width={history:Math.min(390,Math.max(285,window.innerWidth*.23)),chat:Math.min(430,Math.max(300,window.innerWidth*.25))};
+  const reserve=desktop?active.reduce((n,k)=>n+width[k],0):0;
+  document.body.style.setProperty('--bayshore-drawers-width',reserve+'px');
+  document.body.classList.toggle('bayshore-side-dock',desktop&&active.length>0);
+  for(const [name,d] of Object.entries(data)){
+   const st=state[name];
+   d.panel.classList.toggle('bayshore-docked',desktop&&st.open);
+   d.panel.classList.toggle('pinned',desktop&&st.pinned);
+   d.pin.setAttribute('aria-pressed',String(st.pinned));
+   d.pin.textContent=st.pinned?'📌 Pinned':'📌 Pin';
+   d.trigger.setAttribute('aria-expanded',String(st.open));
+   if(desktop&&st.open){
+    d.panel.style.width=width[name]+'px';
+    d.panel.style.right=(both&&name===left?width[right]:0)+'px';
+    d.backdrop.hidden=true;
+   }else{
+    d.panel.style.removeProperty('width');d.panel.style.removeProperty('right');
+    d.backdrop.hidden=!st.open;
+   }
   }
-  for(const [name,p] of Object.entries(config)){
-    p.pin.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();pin(name,!p.panel.classList.contains('pinned'));});
-    // Closing a panel always releases its pinned slot.
-    p.close.addEventListener('click',()=>{if(p.panel.classList.contains('pinned'))pin(name,false);});
-    p.backdrop.addEventListener('click',()=>{if(p.panel.classList.contains('pinned'))pin(name,false);});
-    // On click, use normal panel behavior; after it opens maintain docking of both.
-    p.trigger.addEventListener('click',()=>requestAnimationFrame(sync));
+ }
+ for(const [name,d] of Object.entries(data)){
+  d.trigger.addEventListener('click',()=>setOpen(name,true));
+  d.close.addEventListener('click',()=>setOpen(name,false));
+  d.backdrop.addEventListener('click',()=>setOpen(name,false));
+  d.pin.addEventListener('click',()=>setPin(name));
+ }
+ mobileBtn?.addEventListener('click',()=>setOpen('chat',true));
+ document.addEventListener('keydown',e=>{if(e.key==='Escape'){
+  const transient=Object.keys(state).find(n=>state[n].open&&!state[n].pinned);
+  if(transient)setOpen(transient,false);
+ }});
+ function restore(){
+  const saved=n=>{try{return localStorage.getItem(data[n].key)==='true'}catch(e){return false}};
+  for(const name of ['history','chat']){
+   if(wide.matches&&saved(name)){state[name].pinned=true;pinSequence.push(name);openState(name,true)}
+   else if(!wide.matches){state[name].pinned=false;openState(name,false)}
   }
-  function restore(){
-    for(const p of Object.values(config)){
-      let saved=false;try{saved=localStorage.getItem(p.key)==='true'}catch(e){}
-      p.panel.classList.toggle('pinned',desktop.matches&&saved);
-    }
-    sync();
-  }
-  if(desktop.addEventListener)desktop.addEventListener('change',restore);
-  else if(desktop.addListener)desktop.addListener(restore);
-  restore();
+  render();
+ }
+ if(wide.addEventListener)wide.addEventListener('change',()=>{if(!wide.matches){for(const n of ['history','chat']){state[n].pinned=false;openState(n,false)}}else{pinSequence=[];restore()}render()});
+ window.addEventListener('resize',render);
+ restore();
 })();
 </script></body></html>
